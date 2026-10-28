@@ -49,6 +49,22 @@ jobs:
     - name: Check types
       run: make typecheck
 
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+        cache: pip
+    - name: Install dependencies
+      run: |
+        sudo apt-get update && sudo apt-get install -y libzstd-dev
+        python -m pip install --upgrade pip
+        pip install .[docs]
+    - name: Build docs
+      run: make docs
+
   test:
     needs: [lint, mypy]
     runs-on: ${{ matrix.os }}

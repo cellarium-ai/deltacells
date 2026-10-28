@@ -1,4 +1,4 @@
-# deltacells format, version 2
+# File format
 
 A *dataset* is a directory (or bucket prefix) of *tiles* plus a small manifest. A *tile* is one self-contained object holding
 a block of consecutive cells (rows) of a count matrix in CSR form. All integers are **little-endian**; readers on big-endian

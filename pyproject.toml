@@ -23,14 +23,16 @@ obs = ["pyarrow", "pandas"]
 gcs = ["google-cloud-storage", "fsspec", "gcsfs"]
 test = ["pytest", "mypy", "ruff"]
 docs = [
-  "nbsphinx",
-  "Pillow",
-  "seaborn>=0.13.0",
+  "myst-parser",
   "sphinx",
-  "sphinx_rtd_theme",
+  "sphinx-book-theme",
   "sphinx-copybutton",
 ]
 dev = ["deltacells[docs,test,torch,h5ad,obs,gcs]"]
+
+[project.urls]
+Documentation = "https://cellarium-ai.github.io/deltacells/"
+Source = "https://github.com/cellarium-ai/deltacells"
 
 [project.scripts]
 deltacells = "deltacells.cli:main"

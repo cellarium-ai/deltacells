@@ -1,26 +1,51 @@
-# source: https://github.com/sphinx-notes/pages
-name: Deploy Sphinx documentation to Pages
+# Builds the Sphinx documentation (docs/source) and publishes it to GitHub Pages on every push to main.
+# One-time setup: in the repository settings, set Pages > Source to "GitHub Actions".
+# The same build runs in ci.yml for pull requests, without publishing.
+name: Deploy documentation to Pages
 
 on:
   push:
-    branches: [main] # branch to trigger deployment
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
-  pages:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0  # all tags: the documentation shows the version, which is computed from them
+    - uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+        cache: pip
+    - name: Install dependencies
+      run: |
+        sudo apt-get update && sudo apt-get install -y libzstd-dev
+        python -m pip install --upgrade pip
+        pip install .[docs]
+    - name: Build docs
+      run: make docs
+    - uses: actions/configure-pages@v6
+    - uses: actions/upload-pages-artifact@v5
+      with:
+        path: docs/build/html
+
+  deploy:
+    needs: build
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    permissions:
-      pages: write
-      id-token: write
     steps:
-    - name: Install dependencies
-      run: |
-        sudo apt-get update && sudo apt-get install -y pandoc
-        python -m pip install --upgrade pip
     - id: deployment
-      uses: sphinx-notes/pages@v3
-      with:
-        documentation_path: ./docs/source/
-        pyproject_extras: docs
+      uses: actions/deploy-pages@v5

@@ -28,6 +28,20 @@ is not available, so a parent repository's `pytest` run does not fail on a machi
 
 `make lint` (ruff), `make typecheck` (mypy) and `make test` are what CI runs (`.github/workflows/ci.yml`).
 
+## Documentation
+
+The documentation is a Sphinx project (Markdown pages in `docs/source`, the Book theme), published at
+https://cellarium-ai.github.io/deltacells/ by `.github/workflows/docs.yml` on every push to `main`. To build it locally:
+
+```bash
+pip install -e ".[docs]"
+make docs                     # the output is in docs/build/html; warnings are errors
+python -m http.server -d docs/build/html    # then open http://localhost:8000 (open it over http, not as a file)
+```
+
+The figures of the encoding page are generated from a real shard by `docs/make_figures.py` (it needs matplotlib and anndata) and
+the PNGs are committed, so building the docs needs no data.
+
 ## Releasing
 
 To release, create a GitHub release with a new tag (`v1.2.3` or `1.2.3`): the tag is the version, and nothing in the repository is
@@ -82,5 +96,5 @@ datasets give very short timed windows.
 
 ## Changing the format
 
-Bump `VERSION` in `format.py` and `manifest.py`, keep readers rejecting versions they do not know, and update `docs/FORMAT.md`
+Bump `VERSION` in `format.py` and `manifest.py`, keep readers rejecting versions they do not know, and update `docs/source/format.md`
 and the tests in `tests/test_format.py`.

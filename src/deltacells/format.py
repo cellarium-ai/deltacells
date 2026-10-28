@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-The deltacells tile format (version 2). See ``docs/FORMAT.md`` for the full specification.
+The deltacells tile format (version 2). See ``docs/source/format.md`` for the full specification.
 
 A tile is one self-contained blob holding a block of cells (rows) of a count matrix in CSR form::
 
