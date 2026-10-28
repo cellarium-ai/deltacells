@@ -96,11 +96,15 @@ def x_shape(path: str, x: Any) -> tuple[int, int]:
 
 
 def _var_names(var_group: Any) -> np.ndarray:
+    import h5py
+
     index = var_group.attrs.get("_index")
     if isinstance(index, bytes):
         index = index.decode()
     if index is not None and index in var_group:  # just the index column, not the whole table
-        names = var_group[index][()]
+        column = var_group[index]
+        # a plain dataset, or a group when anndata stores pandas 3 strings (a "nullable-string-array": values and a mask)
+        names = column[()] if isinstance(column, h5py.Dataset) else _read_elem(column)
     else:
         names = _read_elem(var_group).index.to_numpy()
     return np.asarray([n.decode() if isinstance(n, bytes) else n for n in names], dtype=str)

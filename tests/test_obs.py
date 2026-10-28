@@ -385,7 +385,8 @@ def test_to_pandas(built, cache):
     assert list(df["barcode"]) == list(obs["barcode"]) and df["doublet"].tolist() == obs["doublet"].tolist()
     assert [None if pd.isna(v) else v for v in df["sex"]] == [None if pd.isna(v) else v for v in obs["sex"]]
     plain = store.to_pandas(["cell_type"], categorical=False)
-    assert plain["cell_type"].dtype == object
+    assert not isinstance(plain["cell_type"].dtype, pd.CategoricalDtype)  # strings: object, or str with pandas 3
+    assert pd.api.types.is_object_dtype(plain["cell_type"]) or pd.api.types.is_string_dtype(plain["cell_type"])
     assert list(store.to_pandas().columns) == obs.columns.tolist()
 
 
