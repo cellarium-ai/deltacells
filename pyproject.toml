@@ -1,14 +1,15 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=77", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "deltacells"
-version = "0.1.0"
+dynamic = ["version"]  # from the latest git tag (setuptools-scm): the tag of a GitHub release is the version of the release
 description = "Fast, compact, cloud-friendly tiles of single-cell count matrices: delta-coded gene gaps + zstd, decoded by a small C core."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 authors = [
     { name = "Stephen Fleming", email="sfleming@broadinstitute.org" },
     { name = "Cellarium contributors" },
@@ -34,14 +35,54 @@ dev = ["deltacells[docs,test,torch,h5ad,obs,gcs]"]
 [project.scripts]
 deltacells = "deltacells.cli:main"
 
+[tool.setuptools_scm]
+# A tag such as v1.2.3 gives version 1.2.3; commits after a tag give 1.2.4.devN (PyPI does not accept local versions).
+local_scheme = "no-local-version"
+# for a source tree that is neither a git checkout nor an sdist; the release workflow refuses to publish this version
+fallback_version = "0.0.0"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-deltacells = ["py.typed"]
+deltacells = ["py.typed", "*.pyi"]
+
+[tool.cibuildwheel]
+# Wheels are built by .github/workflows/pypi.yml. libzstd is built from source as a static library, so that a wheel needs
+# no libzstd on the user's machine (see setup.py).
+build = "cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux_* *-win32 *_i686"
+before-all = "curl -sfL https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz | tar xz -C /tmp && MACOSX_DEPLOYMENT_TARGET=11.0 CFLAGS='-O3 -fPIC' make -C /tmp/zstd-1.5.7/lib -j4 PREFIX=/tmp/zstd install-static install-includes"
+test-requires = ["pytest"]
+test-command = "pytest {project}/tests -q"
+
+[tool.cibuildwheel.environment]
+DELTACELLS_STATIC_ZSTD = "1"
+ZSTD_ROOT = "/tmp/zstd"
+MACOSX_DEPLOYMENT_TARGET = "11.0"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.mypy]
+exclude = ["^benchmarks/bpcells_decode/build/"]  # BPCells checkout downloaded by benchmarks/bpcells_decode/build.sh
+
+[[tool.mypy.overrides]]
+# third-party packages that ship no type information (or are optional and may not be installed)
+module = [
+  "anndata.*",
+  "bpcells.*",
+  "fsspec.*",
+  "google.*",
+  "h5py.*",
+  "numcodecs.*",
+  "pandas.*",
+  "pyarrow.*",
+  "scipy.*",
+  "tiledbsoma.*",
+  "torch.*",
+]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 120

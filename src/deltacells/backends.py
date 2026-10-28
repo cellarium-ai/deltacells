@@ -9,6 +9,7 @@ import io
 import os
 import time
 from abc import ABC, abstractmethod
+from typing import Any
 
 import numpy as np
 
@@ -71,7 +72,7 @@ class GCSBackend(Backend):
     def __init__(self, bucket: str, prefix: str = "", client=None) -> None:
         self.bucket_name, self.prefix = bucket, prefix.strip("/")
         self._client = client
-        self._bucket = None
+        self._bucket: Any = None
 
     def _blob(self, name: str):
         if self._bucket is None:

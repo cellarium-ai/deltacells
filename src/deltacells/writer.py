@@ -80,8 +80,10 @@ def _canonical_counts(matrix: Any) -> sp.csr_matrix:
                 raise ValueError("values must be integer counts (found non-integer or non-finite values)")
         elif not np.issubdtype(data.dtype, np.integer) and data.dtype != np.bool_:
             raise ValueError(f"unsupported value dtype {data.dtype}")
-        if data.min() < 0 or data.max() > MAX_VALUE:
-            raise ValueError(f"values must lie in [0, {MAX_VALUE}] (got min {data.min()}, max {data.max()})")
+        # compare as Python floats: casting MAX_VALUE to float32 would round it up to 2**31 and let that value through
+        lo, hi = float(data.min()), float(data.max())
+        if lo < 0 or hi > MAX_VALUE:
+            raise ValueError(f"values must lie in [0, {MAX_VALUE}] (got min {lo:.0f}, max {hi:.0f})")
         if np.any(data == 0):
             csr = csr.copy()
             csr.eliminate_zeros()
@@ -475,6 +477,7 @@ class DatasetWriter:
 
     def _record_tile(self, n: int, nnz: int, n_bytes: int, obs_table: Any) -> None:
         if obs_table is not None:
+            assert self._obs_writer is not None
             self._obs_writer.add_tile(obs_table)
         self._publish(Manifest.tile_name(len(self._cells)))
         self._cells.append(n)

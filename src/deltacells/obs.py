@@ -313,6 +313,7 @@ class ObsWriter:
         if self._writer is None:
             return
         self._writer.close()
+        assert self._tmp is not None
         final = self._shard_path(len(self.shard_bytes))
         os.replace(self._tmp, final)
         self.shard_bytes.append(os.path.getsize(final))

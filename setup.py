@@ -35,7 +35,9 @@ def find_zstd() -> dict:
         ):
             static = os.path.join(libdir, "libzstd.a")
             if os.environ.get("DELTACELLS_STATIC_ZSTD") == "1" and os.path.exists(static):
-                return {"include_dirs": [include], "extra_objects": [static]}
+                # keep the zstd symbols private, so that another libzstd loaded into the process cannot take over our calls
+                hide = ["-Wl,--exclude-libs,ALL"] if sys.platform.startswith("linux") else []
+                return {"include_dirs": [include], "extra_objects": [static], "extra_link_args": hide}
             if any(
                 f.startswith("libzstd.") and not f.endswith(".a") for f in os.listdir(libdir) if os.path.isdir(libdir)
             ):

@@ -23,11 +23,11 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "examples"))
 from reference_loader import TileShuffleDataset, to_torch_csr  # noqa: E402
 
-from deltacells import DeltaCellsDataset, LocalBackend, ThrottledBackend  # noqa: E402
+from deltacells import Backend, DeltaCellsDataset, LocalBackend, ThrottledBackend  # noqa: E402
 
 
 def run(args, workers: int) -> None:
-    backend = LocalBackend(args.dataset)
+    backend: Backend = LocalBackend(args.dataset)
     if args.bandwidth_mbps or args.latency_ms:
         backend = ThrottledBackend(
             backend,

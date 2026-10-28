@@ -9,7 +9,7 @@ decompresses a 10k-cell tile into CSR arrays in ~0.11 s on one core (0.02 s on 8
 AnnData / Arrow objects. Genes are sorted by decreasing total counts, which is what makes the
 compression work.
 
-> **Status: alpha (0.1.0).** Developed and tested on macOS arm64 and Linux x86-64 / Python 3.10. The GCS tile-reading backend has
+> **Status: alpha.** Developed and tested on macOS arm64 and Linux x86-64 / Python 3.10. The GCS tile-reading backend has
 > not been exercised against a real bucket, nor has writing a converted dataset to one. See [Limitations](#limitations).
 
 ## At a glance

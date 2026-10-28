@@ -26,6 +26,21 @@ pytest deltacells/tests       # from a parent repository, after an in-place buil
 is not available, so a parent repository's `pytest` run does not fail on a machine without the extension. Tests that need
 `torch` or `anndata` are skipped when those are missing.
 
+`make lint` (ruff), `make typecheck` (mypy) and `make test` are what CI runs (`.github/workflows/ci.yml`).
+
+## Releasing
+
+To release, create a GitHub release with a new tag (`v1.2.3` or `1.2.3`): the tag is the version, and nothing in the repository is
+edited. The version is not stored anywhere in the sources: [setuptools-scm](https://setuptools-scm.readthedocs.io) reads it from
+git when the package is built, so a checkout between tags is `<next version>.devN`, and `deltacells.__version__` reports the
+installed version (reinstall after pulling new tags to update it in an editable install).
+
+Publishing the release runs `.github/workflows/pypi.yml`: it builds the sdist, builds the wheels from it (Linux x86_64 /
+aarch64 and macOS arm64, CPython 3.10-3.13, libzstd linked statically; see `[tool.cibuildwheel]` in `pyproject.toml`), checks
+that they all have the tag's version and uploads them to PyPI with trusted publishing. This needs the `pypi` environment in the
+GitHub repository and this workflow listed as a trusted publisher on PyPI. Run the workflow by hand to build the artifacts
+without publishing.
+
 ## Benchmarks
 
 ```bash
@@ -41,6 +56,9 @@ python benchmarks/bench_pipeline.py /tmp/real --workers 2 --bandwidth-mbps 150 -
 python benchmarks/bench_compression.py /tmp/real --levels 3,12,19 --chunks 1,8
 python benchmarks/check_against_h5ad.py /tmp/real "shards/*.h5ad"                # cell-by-cell comparison with the source
 ```
+
+`make benchmark` runs all of these that need no real data (synthetic data, then decode, compression, obs and pipeline benchmarks);
+see the comment above that target in the `Makefile` for the settings (`BENCH_DIR`, `BENCH_CELLS`, `BENCH_GENES`, ...).
 
 Benchmarking notes: run on an otherwise idle machine (the pipeline benchmark needs a few GB of free RAM per worker); the
 `bench_pipeline` timing stops at the last received batch so that DataLoader worker shutdown is not counted, and very small

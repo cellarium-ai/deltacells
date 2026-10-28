@@ -12,10 +12,11 @@ import re
 import time
 from bisect import bisect_right
 from collections import deque
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Executor, Future, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from itertools import accumulate
+from typing import Any
 
 import numpy as np
 import scipy.sparse as sp
@@ -67,10 +68,9 @@ _SCAN_PROCESSES_MAX = 24  # the scan waits for the network, so a bit more than o
 
 
 def _cpu_count() -> int:
-    try:
+    if hasattr(os, "sched_getaffinity"):  # not on macOS
         return len(os.sched_getaffinity(0))
-    except AttributeError:  # pragma: no cover
-        return os.cpu_count() or 1
+    return os.cpu_count() or 1  # pragma: no cover
 
 
 def _scan_job(job: tuple[str, bool, bool]) -> FileMeta:
@@ -401,6 +401,8 @@ def _convert_h5ad(
 
     def scan() -> Iterator:
         """One pass over the files (not reading ``X``): checks var_names, counts cells and yields each file's obs frame (or None)."""
+        fn: Callable[[Any], Any]
+        items: Iterable[Any]
         if scan_processes:
             pool: Executor = ProcessPoolExecutor(scan_processes, mp_context=multiprocessing.get_context("spawn"))
             jobs = [(files[k], obs, k == 0) for k in range(len(files))]  # the gene table comes from the first file
@@ -544,6 +546,7 @@ def _convert_h5ad(
             if n_obs[k] == 0:
                 continue
             frame = _obs_frame(read_h5ad_meta(stager.local(k)).obs, obs_names, obs_exclude)
+            assert schema is not None
             table = schema.encode(frame)
             buf = table if buf is None else pa.concat_tables([buf, table])
             while buf.num_rows >= tile_size:

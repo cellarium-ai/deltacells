@@ -1,3 +1,11 @@
 include LICENSE README.md DEVELOPING.md
-recursive-include src *.c *.py py.typed
+recursive-include src *.c *.py *.pyi py.typed
 recursive-include docs *.md
+# the tests, which the wheel builds run against the installed wheel (they need the examples and benchmarks)
+recursive-include tests *.py
+recursive-include examples *.py
+recursive-include benchmarks *.py
+
+# setuptools-scm also adds every file tracked by git to the sdist; leave out what is not part of the package
+prune .github
+prune benchmarks/bpcells_decode

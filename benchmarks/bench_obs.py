@@ -24,7 +24,7 @@ import time
 
 import numpy as np
 
-from deltacells import CountingBackend, DeltaCellsDataset, LocalBackend, ThrottledBackend
+from deltacells import Backend, CountingBackend, DeltaCellsDataset, LocalBackend, ThrottledBackend
 
 
 def rss_mb() -> float:
@@ -45,7 +45,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     counting = CountingBackend(LocalBackend(args.dataset))
-    backend = counting
+    backend: Backend = counting
     if args.bandwidth_mbps or args.latency_ms:
         backend = ThrottledBackend(
             counting, latency_s=args.latency_ms / 1e3, bandwidth_bytes_per_s=(args.bandwidth_mbps or 0) * 1e6 or None

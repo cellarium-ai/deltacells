@@ -7,6 +7,8 @@ from conftest import make_counts, same
 
 torch = pytest.importorskip("torch")
 
+from torch.utils.data import IterableDataset  # noqa: E402
+
 from deltacells import DatasetWriter, open_dataset  # noqa: E402
 
 N, G, TILE = 240, 50, 60
@@ -49,7 +51,7 @@ def test_shared_memory_output_buffers(built):
     assert same(b.to_scipy(), full[idx]) and oi.is_shared()
 
 
-class _Rows(torch.utils.data.IterableDataset):
+class _Rows(IterableDataset):
     """Each worker yields the batches ``range(i*B, (i+1)*B)`` for its share of the batch numbers."""
 
     def __init__(self, ds, batch_size):

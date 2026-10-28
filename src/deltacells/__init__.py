@@ -3,6 +3,8 @@
 
 """deltacells: fast, compact, cloud-friendly tiles of single-cell count matrices."""
 
+from importlib.metadata import PackageNotFoundError, version
+
 from deltacells.backends import (
     Backend,
     CountingBackend,
@@ -18,7 +20,10 @@ from deltacells.manifest import Manifest
 from deltacells.reader import DecodedTile, SparseBatch, Tile, read_tile
 from deltacells.writer import DatasetWriter, encode_tile, permute_columns, write_tile
 
-__version__ = "0.1.0"
+try:  # the version comes from the git tag the package was built from (see pyproject.toml)
+    __version__ = version("deltacells")
+except PackageNotFoundError:  # pragma: no cover  (the sources are used in place, without an install)
+    __version__ = "0.0.0"
 
 __all__ = [
     "Backend",

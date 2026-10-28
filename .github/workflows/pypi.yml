@@ -1,0 +1,90 @@
+# Publishing a GitHub release publishes that version to PyPI: the version is the release's tag (v1.2.3 or 1.2.3 gives 1.2.3), read
+# from git by setuptools-scm when the package is built. Nothing in the repository needs to be changed for a release.
+#
+# Builds the source distribution, then the wheels from it (Linux x86_64 / aarch64 and macOS arm64, CPython 3.10-3.13; libzstd is
+# linked statically, see [tool.cibuildwheel] in pyproject.toml), and uploads them to PyPI.
+# Run it by hand ("Run workflow") to build everything and download the artifacts without publishing.
+# source: https://github.com/marketplace/actions/pypi-publish, https://cibuildwheel.pypa.io
+name: Upload Python Package to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        fetch-depth: 0  # all tags: the version is computed from them
+    - uses: actions/setup-python@v7
+      with:
+        python-version: "3.12"
+    - name: Build sdist
+      run: |
+        python -m pip install --upgrade pip build
+        python -m build --sdist
+    - uses: actions/upload-artifact@v7
+      with:
+        name: dist-sdist
+        path: dist/*.tar.gz
+
+  wheels:
+    # built from the sdist, which carries the version, so the wheels need no git checkout and always match the sdist
+    name: Build wheels on ${{ matrix.os }}
+    needs: sdist
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        name: dist-sdist
+        path: sdist
+    - name: Find the sdist
+      id: sdist
+      run: echo "path=$(ls sdist/*.tar.gz)" >> "$GITHUB_OUTPUT"
+    - name: Build wheels
+      uses: pypa/cibuildwheel@v3.4.1
+      with:
+        package-dir: ${{ steps.sdist.outputs.path }}
+    - uses: actions/upload-artifact@v7
+      with:
+        name: dist-wheels-${{ matrix.os }}
+        path: wheelhouse/*.whl
+
+  pypi-publish:
+    name: Upload to PyPI
+    if: github.event_name == 'release'
+    needs: [sdist, wheels]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/deltacells
+    permissions:
+      id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
+    steps:
+    - uses: actions/download-artifact@v8
+      with:
+        pattern: dist-*
+        merge-multiple: true
+        path: dist
+    - name: Check that the version is the tag of the release
+      env:
+        TAG: ${{ github.event.release.tag_name }}
+      run: |
+        ls dist
+        test -f "dist/deltacells-${TAG#v}.tar.gz" || { echo "::error::the sdist is not version ${TAG#v}, the tag of this release"; exit 1; }
+        for wheel in dist/*.whl; do
+          case "$(basename "$wheel")" in deltacells-"${TAG#v}"-*) ;; *) echo "::error::$wheel is not version ${TAG#v}"; exit 1 ;; esac
+        done
+    - name: Publish package distributions to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
