@@ -8,12 +8,13 @@ import json
 import os
 
 import numpy as np
-import pandas as pd
 import pytest
 from conftest import make_counts, same
 
 fsspec = pytest.importorskip("fsspec")
 anndata = pytest.importorskip("anndata")
+pd = pytest.importorskip("pandas")
+pytest.importorskip("pyarrow")
 
 from deltacells import DatasetWriter, open_dataset  # noqa: E402
 from deltacells.convert import convert_h5ad, resolve_files  # noqa: E402

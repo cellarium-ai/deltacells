@@ -55,7 +55,9 @@ deltacells = ["py.typed", "*.pyi"]
 build = "cp310-* cp311-* cp312-* cp313-*"
 skip = "*-musllinux_* *-win32 *_i686"
 before-all = "curl -sfL https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz | tar xz -C /tmp && MACOSX_DEPLOYMENT_TARGET=11.0 CFLAGS='-O3 -fPIC' make -C /tmp/zstd-1.5.7/lib -j4 PREFIX=/tmp/zstd install-static install-includes"
-test-requires = ["pytest"]
+# the extras and fsspec are what the tests of the converter, obs and remote storage need; without them those tests are skipped
+test-extras = ["h5ad", "obs"]
+test-requires = ["pytest", "fsspec"]
 test-command = "pytest {project}/tests -q"
 
 [tool.cibuildwheel.environment]

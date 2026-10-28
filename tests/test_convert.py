@@ -5,12 +5,13 @@ import os
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pytest
 import scipy.sparse as sp
 from conftest import make_counts, same
 
 anndata = pytest.importorskip("anndata")
+pd = pytest.importorskip("pandas")
+pytest.importorskip("pyarrow")
 
 from deltacells import open_dataset  # noqa: E402
 from deltacells.cli import main  # noqa: E402
