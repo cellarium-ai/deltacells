@@ -6,25 +6,65 @@
 from __future__ import annotations
 
 import io
+import itertools
 import logging
 import os
 import threading
 import time
 import weakref
-from collections import OrderedDict
-from collections.abc import Iterable, Sequence
+from collections import OrderedDict, deque
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import numpy as np
 
 from deltacells.backends import Backend, open_backend
+from deltacells.format import CHUNK_ENTRY_SIZE, HEADER_SIZE, FormatError
 from deltacells.manifest import GENE_ORDER_NAME, MANIFEST_NAME, VAR_NAMES_NAME, Manifest
-from deltacells.reader import DecodedTile, SparseBatch, Tile, _check_out, as_values_dtype, gather_into
+from deltacells.reader import (
+    DecodedTile,
+    SparseBatch,
+    Tile,
+    _check_out,
+    as_values_dtype,
+    gather_into,
+    read_tile_prefix_indptr,
+)
+
+_PREFIX_ATTEMPTS = (
+    3  # times the start of a tile is read before it is called malformed (a ranged read is not checksummed)
+)
 
 logger = logging.getLogger(__name__)
 
 _DATASETS: weakref.WeakSet[DeltaCellsDataset] = weakref.WeakSet()  # the live datasets, to reset in a forked process
+
+
+class _StaleLayout(Exception):
+    """The lengths of the requested cells in a tile are not those that the start of the tile gave."""
+
+    def __init__(self, tile: int) -> None:
+        super().__init__(tile)
+        self.tile = tile
+
+
+def _ordered_map(
+    pool: ThreadPoolExecutor, fn: Callable[[Any], Any], items: Iterable[Any], window: int
+) -> Iterator[Any]:
+    """``map`` over a thread pool that yields the results in order, keeping at most ``window`` tasks in flight (and so at most
+    that many results waiting)."""
+    it = iter(items)
+    pending: deque[Future] = deque(pool.submit(fn, x) for x in itertools.islice(it, window))
+    try:
+        while pending:
+            result = pending.popleft().result()
+            for x in itertools.islice(it, 1):
+                pending.append(pool.submit(fn, x))
+            yield result
+    finally:
+        for fut in pending:
+            fut.cancel()
 
 
 class DeltaCellsDataset:
@@ -99,7 +139,7 @@ class DeltaCellsDataset:
         self._gene_order: np.ndarray | None = None
         self._obs = None
         self._var = None
-        self.stats = {"tiles_fetched": 0, "fetch_seconds": 0.0, "stall_seconds": 0.0, "tiles_decoded": 0, "decode_seconds": 0.0, "tile_cache_hits": 0, "decoded_cache_hits": 0}  # fmt: skip
+        self.stats = {"tiles_fetched": 0, "fetch_seconds": 0.0, "stall_seconds": 0.0, "tiles_decoded": 0, "decode_seconds": 0.0, "tile_cache_hits": 0, "decoded_cache_hits": 0, "streaming_batches": 0, "prefix_reads": 0}  # fmt: skip
 
     def __getstate__(self) -> dict[str, Any]:
         return {
@@ -327,10 +367,13 @@ class DeltaCellsDataset:
 
     # ------------------------------------------------------------------ batches
 
-    def _layout(self, idx: np.ndarray):
-        """Fetch the tiles ``idx`` touches (parsed only) and compute where each requested cell goes in the output."""
+    def _touched(self, idx: np.ndarray) -> tuple[np.ndarray, list[int]]:
+        """The tile of each requested cell, and the distinct tiles in the order that they are first touched."""
         tile_ids = np.searchsorted(self._limits, idx, side="right")
-        order = list(dict.fromkeys(tile_ids.tolist()))
+        return tile_ids, list(dict.fromkeys(tile_ids.tolist()))
+
+    def _layout(self, idx: np.ndarray, tile_ids: np.ndarray, order: list[int]):
+        """Fetch the tiles ``idx`` touches (parsed only) and compute where each requested cell goes in the output."""
         self.prefetch(order)
         tiles = {t: self.get_tile(t) for t in order}
         local = idx - self._starts[tile_ids]
@@ -343,6 +386,180 @@ class DeltaCellsDataset:
         np.cumsum(lens, out=out_indptr[1:])
         return tile_ids, order, tiles, local, out_indptr
 
+    # A batch that touches more tiles than ``max_prefetch_tiles`` is read as a stream (below), as holding all of its tiles
+    # at once takes memory in proportion to their number, and only ``max_prefetch_tiles`` of them could be fetched ahead.
+
+    @staticmethod
+    def _by_tile(tile_ids: np.ndarray) -> tuple[list[int], list[np.ndarray]]:
+        """The distinct tiles in ascending order, and for each the positions in the batch of its cells (in batch order)."""
+        perm = np.argsort(tile_ids, kind="stable")
+        tiles, first = np.unique(tile_ids[perm], return_index=True)
+        return tiles.tolist(), np.split(perm, first[1:])
+
+    def _require_ranged_reads(self, n_tiles: int) -> None:
+        if not self.backend.ranged_reads:
+            raise NotImplementedError(
+                f"a batch that touches {n_tiles} tiles, more than max_prefetch_tiles ({self.max_prefetch_tiles}), is read by "
+                f"first reading the start of each tile, which {type(self.backend).__name__} cannot do: it has no ranged "
+                "reads. Implement read_range in it (and set ranged_reads = True), or set max_prefetch_tiles to at least "
+                f"{n_tiles} to hold that many tiles in memory at once."
+            )
+
+    def _tile_where(self, t: int) -> str:
+        return f"{self.backend.describe().rstrip('/')}/{Manifest.tile_name(t)}"
+
+    def _read_indptr(self, t: int) -> np.ndarray:
+        """The indptr of tile ``t``, from a ranged read of the start of its object (header, chunk table and indptr: about 8
+        bytes per cell). Runs on an IO thread. The storage client does not checksum a ranged read, so a start that is not valid
+        is read again before the tile is called malformed."""
+        m = self.manifest
+        n_cells, size = m.tile_cells[t], m.tile_bytes[t]
+        # a tile has at most m.n_chunks chunks (fewer if the writer merged empty ones; the header says), so this is the whole start
+        length = min(size, HEADER_SIZE + CHUNK_ENTRY_SIZE * min(m.n_chunks, n_cells) + 8 * (n_cells + 1))
+        name = Manifest.tile_name(t)
+        error: FormatError | None = None
+        for _ in range(_PREFIX_ATTEMPTS):
+            data = self.backend.read_range(name, 0, length)
+            with self._stats_lock:
+                self.stats["prefix_reads"] += 1
+            try:
+                return read_tile_prefix_indptr(data, n_cells=n_cells, n_genes=self.n_genes, size=size)
+            except FormatError as e:
+                error = e
+        raise FormatError(
+            f"tile {t} ({self._tile_where(t)}) is malformed: {error}. Re-create the dataset (re-run the conversion that "
+            "wrote it, or write that tile again)."
+        ) from error
+
+    def _indptrs(self, tiles: list[int]) -> Iterator[np.ndarray]:
+        """The indptr of each of ``tiles``, in order: from the tile if it is cached, else from the start of its object."""
+        cached: dict[int, np.ndarray] = {}
+        missing = []
+        for t in tiles:
+            fut = self._tiles.get(t)
+            if fut is not None and fut.done() and not fut.cancelled() and fut.exception() is None:
+                cached[t] = fut.result().indptr
+            else:
+                missing.append(t)
+        read = _ordered_map(self._io(), self._read_indptr, missing, window=max(8, 4 * self.io_threads))
+        for t in tiles:
+            yield cached[t] if t in cached else next(read)
+
+    def _stream_layout(
+        self, idx: np.ndarray, tile_ids: np.ndarray, tiles: list[int], sels: list[np.ndarray]
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """``(local, lens, out_indptr)``: the cell within its tile, the length of each requested cell, and where each goes in
+        the output, from the indptr of the tiles alone (no tile is read whole)."""
+        local = idx - self._starts[tile_ids]
+        lens = np.empty(len(idx), dtype=np.int64)
+        for sel, indptr in zip(sels, self._indptrs(tiles)):
+            rows = local[sel]
+            lens[sel] = indptr[rows + 1] - indptr[rows]
+        out_indptr = np.zeros(len(idx) + 1, dtype=np.int64)
+        np.cumsum(lens, out=out_indptr[1:])
+        return local, lens, out_indptr
+
+    def _stream_gather(
+        self,
+        tiles: list[int],
+        sels: list[np.ndarray],
+        local: np.ndarray,
+        lens: np.ndarray,
+        out_indptr: np.ndarray,
+        out_indices: np.ndarray,
+        out_values: np.ndarray,
+    ) -> None:
+        """Fetch ``tiles`` through a window of ``max_prefetch_tiles`` fetches ahead; decode each, gather its cells into the
+        output, and let go of it (so that only the window and the tile in hand are held, not all the tiles)."""
+        pending: deque[tuple[int, Future, bool]] = deque()  # (tile, fetch, whether this call started the fetch)
+        todo = iter(tiles)
+
+        def start_next() -> None:
+            for t in itertools.islice(todo, 1):
+                fut = self._tiles.get(t)  # a tile that was prefetched is used as it is (and stays cached)
+                own = fut is None or fut.cancelled()
+                pending.append((t, self._io().submit(self._fetch_tile, t) if own else fut, own))  # type: ignore[arg-type]
+
+        try:
+            for _ in range(self.max_prefetch_tiles):
+                start_next()
+            for sel in sels:
+                t, fut, _ = pending.popleft()
+                start_next()
+                t0 = time.perf_counter()
+                try:
+                    tile = fut.result()
+                except BaseException:
+                    if self._tiles.get(t) is fut:
+                        del self._tiles[t]  # let a later call retry
+                    raise
+                with self._stats_lock:
+                    self.stats["stall_seconds"] += time.perf_counter() - t0
+                rows = local[sel]
+                indptr = tile.indptr
+                if not np.array_equal(indptr[rows + 1] - indptr[rows], lens[sel]):
+                    raise _StaleLayout(t)  # never gather into an output laid out for other lengths
+                dec = self._decoded_tile(t, tile)
+                gather_into(
+                    dec.indptr,
+                    dec.indices,
+                    dec.values,
+                    rows,
+                    np.ascontiguousarray(out_indptr[sel]),
+                    out_indices,
+                    out_values,
+                )
+                del tile, dec
+        finally:
+            for _, fut, own in pending:
+                if own:
+                    fut.cancel()
+
+    def _stream_nnz(self, idx: np.ndarray, tile_ids: np.ndarray) -> int:
+        tiles, sels = self._by_tile(tile_ids)
+        self._require_ranged_reads(len(tiles))
+        return int(self._stream_layout(idx, tile_ids, tiles, sels)[2][-1])
+
+    def _get_batch_streaming(
+        self,
+        idx: np.ndarray,
+        tile_ids: np.ndarray,
+        vdt: np.dtype,
+        out_indices: np.ndarray | None,
+        out_values: np.ndarray | None,
+    ) -> SparseBatch:
+        tiles, sels = self._by_tile(tile_ids)
+        self._require_ranged_reads(len(tiles))
+        self.stats["streaming_batches"] += 1
+        for attempt in (1, 2):
+            local, lens, out_indptr = self._stream_layout(idx, tile_ids, tiles, sels)
+            nnz = int(out_indptr[-1])
+            if out_indices is None:
+                oi = np.empty(nnz, dtype=np.int32)
+            else:
+                _check_out(out_indices, "out_indices", nnz, np.dtype(np.int32))
+                oi = out_indices
+            if out_values is None:
+                ov = np.empty(nnz, dtype=vdt)
+            else:
+                _check_out(out_values, "out_values", nnz, vdt)
+                ov = out_values
+            try:
+                self._stream_gather(tiles, sels, local, lens, out_indptr, oi, ov)
+            except _StaleLayout as e:
+                where = f"tile {e.tile} ({self._tile_where(e.tile)})"
+                if attempt == 2:
+                    raise FormatError(
+                        f"{where} does not agree with its own prefix: the lengths of the requested cells in the tile differ "
+                        "from those in the first bytes of the same object, read just before, and again when they were read "
+                        "again. The tile is malformed, or was damaged in transfer (or the dataset was rewritten while it was "
+                        "read). Re-create the dataset (re-run the conversion that wrote it), or try again."
+                    ) from None
+                logger.warning("%s does not agree with its own prefix; reading the batch again", where)
+            else:
+                return SparseBatch(out_indptr, oi[:nnz], ov[:nnz], self.n_genes)
+        raise AssertionError("unreachable")  # pragma: no cover
+
     def _as_indices(self, indices: Sequence[int] | np.ndarray) -> np.ndarray:
         idx = np.ascontiguousarray(np.asarray(indices, dtype=np.int64)).ravel()
         if len(idx) and (idx.min() < 0 or idx.max() >= self.n_cells):
@@ -352,11 +569,16 @@ class DeltaCellsDataset:
     def batch_nnz(self, indices: Sequence[int] | np.ndarray) -> int:
         """Number of nonzeros :meth:`get_batch` would return for ``indices`` (fetches the tiles but does not decode them).
 
-        Use it to allocate exactly-sized output buffers (e.g. shared-memory tensors) before calling ``get_batch``.
+        Use it to allocate exactly-sized output buffers (e.g. shared-memory tensors) before calling ``get_batch``. For a batch
+        that touches more than ``max_prefetch_tiles`` tiles it reads only the start of each tile (about 8 bytes per cell), not
+        the tiles.
         """
         idx = self._as_indices(indices)
         with self._lock:
-            return int(self._layout(idx)[4][-1])
+            tile_ids, order = self._touched(idx)
+            if len(order) > self.max_prefetch_tiles:
+                return self._stream_nnz(idx, tile_ids)
+            return int(self._layout(idx, tile_ids, order)[4][-1])
 
     def get_batch(
         self,
@@ -376,12 +598,21 @@ class DeltaCellsDataset:
                 without another copy.
 
         Cells are gathered tile by tile; a batch spanning several tiles decodes each of them (use :meth:`prefetch_cells` ahead of
-        time and iterate cells so that consecutive batches share tiles).
+        time and iterate cells so that consecutive batches share tiles). A batch that touches no more than
+        ``max_prefetch_tiles`` tiles fetches them all at once. One that touches more is read as a stream: the start of each
+        tile (its ``indptr``, about 8 bytes per cell) is read first to lay out the output, then the tiles are fetched through
+        a window of ``max_prefetch_tiles``, decoded and gathered one at a time, so that memory does not grow with the number
+        of tiles. That needs a backend with ranged reads (``NotImplementedError`` otherwise). Even so, a batch of scattered
+        cells decodes every tile it touches, so sorting the cells by tile, or reading the cells of a tile together, is far
+        faster.
         """
         idx = self._as_indices(indices)
         vdt = as_values_dtype(values_dtype)
         with self._lock:
-            tile_ids, order, tiles, local, out_indptr = self._layout(idx)
+            tile_ids, order = self._touched(idx)
+            if len(order) > self.max_prefetch_tiles:
+                return self._get_batch_streaming(idx, tile_ids, vdt, out_indices, out_values)
+            tile_ids, order, tiles, local, out_indptr = self._layout(idx, tile_ids, order)
             nnz = int(out_indptr[-1])
             if out_indices is None:
                 out_indices = np.empty(nnz, dtype=np.int32)
