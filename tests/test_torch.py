@@ -86,3 +86,51 @@ def test_dataloader_with_workers(built, workers):
         got[int(item["id"])] = csr.to_dense().numpy()
     assert sorted(got) == list(range(10))
     assert np.array_equal(np.vstack([got[b] for b in sorted(got)]), full.toarray())
+
+
+class _AlwaysCorrupt:
+    """A fake GCS client whose every download fails its checksum."""
+
+    def __init__(self, error):
+        self.error = error
+
+    def bucket(self, name):
+        return self
+
+    def blob(self, name):
+        error = self.error
+
+        class Blob:
+            def download_as_bytes(self, start=None, end=None):
+                raise error
+
+        return Blob()
+
+
+class _ReadsATile(IterableDataset):
+    def __init__(self, backend):
+        self.backend = backend
+
+    def __iter__(self):
+        yield self.backend.read("tiles/tile_000003.dct")
+
+
+def test_corrupt_gcs_download_message_survives_a_dataloader_worker():
+    # `DataCorruption` itself arrives blank from a worker (torch rebuilds it as `DataCorruption(message)`, which puts the
+    # message where the HTTP response goes); `CorruptGCSDownloadError` must not.
+    exceptions = pytest.importorskip("google.cloud.storage.exceptions")
+    from deltacells import CorruptGCSDownloadError, GCSBackend
+
+    error = exceptions.DataCorruption(None, "Checksum mismatch: expected 'AAAA==', got 'BBBB=='")
+    backend = GCSBackend("bkt", "pre", client=_AlwaysCorrupt(error), max_attempts=1)
+    # "fork": the fake client is not pickled, and the worker needs no other import to find it
+    dl = torch.utils.data.DataLoader(
+        _ReadsATile(backend), batch_size=None, num_workers=1, multiprocessing_context="fork"
+    )
+    with pytest.raises(CorruptGCSDownloadError) as info:
+        next(iter(dl))
+    for text in ("gs://bkt/pre/tiles/tile_000003.dct", "expected 'AAAA=='", "got 'BBBB=='"):
+        assert text in str(info.value)
+    with pytest.raises(exceptions.DataCorruption) as bare:  # the problem this guards against, demonstrated
+        raise type(error)(str(error))
+    assert str(bare.value) == ""

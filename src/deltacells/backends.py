@@ -6,12 +6,16 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
+import random
 import time
 from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class Backend(ABC):
@@ -61,16 +65,53 @@ class LocalBackend(Backend):
         return f"local:{self.root}"
 
 
+class CorruptGCSDownloadError(OSError):
+    """A Google Cloud Storage download failed its checksum on every attempt.
+
+    The message names the ``gs://`` object, the number of attempts and the checksums reported by the client. It is deliberately
+    constructed from a single string: that is how a ``torch`` ``DataLoader`` rebuilds an exception raised in a worker process
+    (``type(e)(message)``), so the message still arrives, readable, in the main process.
+    """
+
+
+def _data_corruption_types() -> tuple[type[BaseException], ...]:
+    """The exception class(es) ``google-cloud-storage`` raises when a download does not match its checksum (none if it is
+    not installed, in which case a client passed in by the caller can not raise them either)."""
+    types: list[type[BaseException]] = []
+    try:
+        from google.cloud.storage.exceptions import DataCorruption
+
+        types.append(DataCorruption)
+    except ImportError:  # pragma: no cover  (older google-cloud-storage, or none)
+        pass
+    try:
+        from google.resumable_media import DataCorruption as ResumableDataCorruption
+
+        types.append(ResumableDataCorruption)
+    except ImportError:  # pragma: no cover
+        pass
+    return tuple(types)
+
+
 class GCSBackend(Backend):
     """Tiles under ``gs://bucket/prefix`` (requires ``google-cloud-storage``; credentials as for that library).
 
     The client is created lazily and not pickled, so a dataset using this backend can be sent to DataLoader workers.
-    Note: not exercised by this package's test-suite (no network access there); the throttled-backend tests and benchmarks
-    emulate a remote store.
+    Note: only exercised by this package's test-suite with fake clients (no network access there); the throttled-backend
+    tests and benchmarks emulate a remote store.
+
+    A download whose checksum does not match is almost always a transient transfer glitch, but ``google-cloud-storage`` does
+    not retry it (it retries connection errors and 5xx responses only). ``read`` and ``read_range`` therefore download the
+    object again, up to ``max_attempts`` times in all, pausing about 0.5 s, 1 s, 2 s, ... in between (each pause randomly
+    lengthened by up to 50%), and log a warning for each repeat. If every attempt fails, :class:`CorruptGCSDownloadError` is
+    raised, naming the object. Any other error is raised at once.
     """
 
-    def __init__(self, bucket: str, prefix: str = "", client=None) -> None:
+    def __init__(self, bucket: str, prefix: str = "", client=None, max_attempts: int = 4) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
         self.bucket_name, self.prefix = bucket, prefix.strip("/")
+        self.max_attempts = max_attempts
         self._client = client
         self._bucket: Any = None
 
@@ -85,8 +126,32 @@ class GCSBackend(Backend):
             self._bucket = self._client.bucket(self.bucket_name)
         return self._bucket.blob(f"{self.prefix}/{name}" if self.prefix else name)
 
+    def _download(self, name: str, **kwargs) -> bytes:
+        """``download_as_bytes`` of the object, repeated if the checksum of what arrived does not match."""
+        corruption = _data_corruption_types()
+        for attempt in range(1, self.max_attempts + 1):
+            try:
+                return self._blob(name).download_as_bytes(**kwargs)
+            except corruption as e:
+                where = f"{self.describe().rstrip('/')}/{name}"
+                if attempt == self.max_attempts:
+                    raise CorruptGCSDownloadError(
+                        f"{where}: the download failed its checksum on all {attempt} attempts. Last error: {e}"
+                    ) from e
+                pause = 0.5 * 2 ** (attempt - 1) * (1 + 0.5 * random.random())
+                logger.warning(
+                    "%s: the download failed its checksum (attempt %d of %d); trying again in %.1f s. Error: %s",
+                    where,
+                    attempt,
+                    self.max_attempts,
+                    pause,
+                    e,
+                )
+                time.sleep(pause)
+        raise AssertionError("unreachable")  # pragma: no cover
+
     def read(self, name: str) -> bytes:
-        return self._blob(name).download_as_bytes()
+        return self._download(name)
 
     def exists(self, name: str) -> bool:
         return self._blob(name).exists()
@@ -99,7 +164,7 @@ class GCSBackend(Backend):
     def read_range(self, name: str, offset: int, length: int) -> bytes:
         if length <= 0:
             return b""
-        return self._blob(name).download_as_bytes(start=offset, end=offset + length - 1)  # `end` is inclusive
+        return self._download(name, start=offset, end=offset + length - 1)  # `end` is inclusive
 
     def describe(self) -> str:
         return f"gs://{self.bucket_name}/{self.prefix}"

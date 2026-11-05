@@ -87,7 +87,7 @@ datasets give very short timed windows.
 | `writer.py` | `encode_tile`, `write_tile`, `DatasetWriter`, `permute_columns` |
 | `reader.py` | `Tile` (parse, verify, decode), `DecodedTile`, `SparseBatch`, row gather |
 | `manifest.py` | `Manifest` (dataset JSON) |
-| `backends.py` | `LocalBackend`, `GCSBackend`, `ThrottledBackend` |
+| `backends.py` | `LocalBackend`, `GCSBackend` (repeats a download that fails its checksum), `ThrottledBackend` |
 | `dataset.py` | `DeltaCellsDataset`: tile prefetch, decoded-tile cache with buffer reuse, `get_batch`, `obs`, `var` |
 | `obs.py` | per-cell metadata: `ObsSchema`, tile-aligned parquet shards, `ObsStore` (localization to a per-column Arrow cache, `take`, `to_pandas`) |
 | `convert.py`, `cli.py` | h5ad conversion and the `deltacells` command |
