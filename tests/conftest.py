@@ -42,6 +42,39 @@ def counts():
     return make_counts
 
 
+def run_in_forked_child(fn, timeout=15):
+    """Run ``fn()`` in a forked child process and return its result (it must be picklable); fail, rather than hang, if the
+    child does not finish. The child inherits everything the test has built, as a DataLoader worker on Linux does."""
+    import multiprocessing
+
+    if not hasattr(os, "fork"):
+        pytest.skip("needs fork")
+    ctx = multiprocessing.get_context("fork")
+    queue = ctx.Queue()
+
+    def target():
+        try:
+            queue.put(("ok", fn()))
+        except BaseException as e:  # reported to the parent
+            queue.put(("error", repr(e)))
+
+    child = ctx.Process(target=target, daemon=True)
+    child.start()
+    try:
+        kind, value = queue.get(timeout=timeout)
+    except Exception:
+        kind, value = "hung", None
+    finally:
+        child.join(1)
+        if child.is_alive():
+            child.kill()
+            child.join()
+    if kind == "hung":
+        pytest.fail(f"the forked process did not finish within {timeout} s (is it waiting for missing threads?)")
+    assert kind == "ok", value
+    return value
+
+
 def same(a, b):
     """Exact equality of two sparse matrices (shape and values)."""
     a, b = sp.csr_matrix(a), sp.csr_matrix(b)

@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import io
+import logging
+import os
 import threading
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -18,6 +21,10 @@ import numpy as np
 from deltacells.backends import Backend, open_backend
 from deltacells.manifest import GENE_ORDER_NAME, MANIFEST_NAME, VAR_NAMES_NAME, Manifest
 from deltacells.reader import DecodedTile, SparseBatch, Tile, _check_out, as_values_dtype, gather_into
+
+logger = logging.getLogger(__name__)
+
+_DATASETS: weakref.WeakSet[DeltaCellsDataset] = weakref.WeakSet()  # the live datasets, to reset in a forked process
 
 
 class DeltaCellsDataset:
@@ -41,7 +48,10 @@ class DeltaCellsDataset:
         obs_columns: Obs columns to make local right away (see :attr:`obs`); more can be added any time.
 
     The object is picklable (caches, threads and buffers are rebuilt lazily), so it can be passed to DataLoader workers. It is
-    not safe to call ``get_batch`` concurrently from several threads of one process (calls are serialized by a lock).
+    also safe to fork a process that has already read from it (DataLoader workers on Linux are forked): a forked process
+    starts with empty caches and no threads, as after unpickling, because it inherits neither the parent's threads nor its
+    fetches in flight. It is not safe to call ``get_batch`` concurrently from several threads of one process (calls are
+    serialized by a lock).
     """
 
     def __init__(
@@ -72,6 +82,9 @@ class DeltaCellsDataset:
     # ------------------------------------------------------------------ pickling / lifecycle
 
     def _init_runtime(self) -> None:
+        """Set up everything that is not part of the dataset's description: locks, caches, buffers and (lazily) threads. Done
+        when it is made, when it is unpickled, and in a process forked from one that has it (see ``_reset_after_fork``)."""
+        _DATASETS.add(self)
         self._limits = self.manifest.limits
         self._starts = np.concatenate([[0], self._limits[:-1]]).astype(np.int64)
         self._lock = threading.RLock()  # guards the caches; never held by the fetch threads
@@ -399,6 +412,26 @@ class DeltaCellsDataset:
         if isinstance(key, slice):
             return self.get_batch(np.arange(*key.indices(self.n_cells)))
         return self.get_batch(key)
+
+
+def _reset_after_fork() -> None:
+    """Give every dataset a forked process inherits the runtime state that unpickling would give it.
+
+    A fork copies the dataset but only the calling thread: the copy's thread pools have no threads (so a fetch submitted to
+    them is never run, whether the pool believes an idle thread exists or is already at its size), the fetches that were in
+    flight in the parent stay unfinished forever, and a lock that another thread of the parent held stays held. The caches
+    are dropped too, as a worker that inherited them would all hold the parent's tiles. Exceptions are only printed in an
+    at-fork hook, so they are logged here instead, per dataset.
+    """
+    for ds in list(_DATASETS):
+        try:
+            ds._init_runtime()
+        except Exception:  # pragma: no cover
+            logger.exception("could not reset a DeltaCellsDataset in a forked process")
+
+
+if hasattr(os, "register_at_fork"):  # not on Windows, where there is no fork
+    os.register_at_fork(after_in_child=_reset_after_fork)
 
 
 def open_dataset(uri: str | Backend, **kwargs: Any) -> DeltaCellsDataset:

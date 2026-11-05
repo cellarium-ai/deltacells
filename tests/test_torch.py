@@ -88,6 +88,23 @@ def test_dataloader_with_workers(built, workers):
     assert np.array_equal(np.vstack([got[b] for b in sorted(got)]), full.toarray())
 
 
+def test_forked_dataloader_workers_after_an_in_process_read(built):
+    # Workers forked from a process that has already read a tile (so that its fetch threads exist) must not wait for them.
+    root, full = built
+    ds = open_dataset(root, max_cached_tiles=1)
+    ds.get_batch([0])
+    dl = torch.utils.data.DataLoader(
+        _Rows(ds, 25), batch_size=None, num_workers=2, multiprocessing_context="fork", timeout=60
+    )
+    got = {}
+    for item in dl:
+        csr = torch.sparse_csr_tensor(
+            item["indptr"], item["indices"], item["values"], size=(len(item["indptr"]) - 1, G)
+        )
+        got[int(item["id"])] = csr.to_dense().numpy()
+    assert np.array_equal(np.vstack([got[b] for b in sorted(got)]), full.toarray())
+
+
 class _AlwaysCorrupt:
     """A fake GCS client whose every download fails its checksum."""
 
