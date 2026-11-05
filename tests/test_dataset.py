@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from conftest import make_counts, same
+from conftest import make_counts, run_in_forked_child, same
 
 from deltacells import (
     DatasetWriter,
@@ -406,3 +406,53 @@ def test_add_tile_does_not_modify_the_callers_matrix(tmp_path):
         w.add_tile(m)
     assert np.array_equal(m.data, snap[0]) and np.array_equal(m.indices, snap[1]) and np.array_equal(m.indptr, snap[2])
     assert same(open_dataset(str(tmp_path / "d"))[:].to_scipy(), m[:, order])
+
+
+# ---------------------------------------------------------------------- fork safety (DataLoader workers on Linux)
+
+
+def test_forked_process_can_read_after_the_parent_did(built, expected):
+    ds = open_dataset(built[0], max_cached_tiles=1)
+    ds.get_batch([1, 2, 3])  # starts a fetch thread in this process, which is idle again afterwards
+    # one tile that the parent did not read: one fetch, for which the inherited pool has an "idle" thread
+    idx = [160, 150]
+
+    def child():
+        ds.prefetch_cells(idx)
+        return ds.get_batch(idx).to_scipy().toarray()
+
+    assert np.array_equal(run_in_forked_child(child), expected[idx].toarray())
+    assert same(ds.get_batch(idx).to_scipy(), expected[idx])  # and the parent is unaffected
+    ds.close()
+
+
+def test_forked_process_does_not_wait_for_a_fetch_that_was_in_flight(built, expected):
+    ds = DeltaCellsDataset(ThrottledBackend(LocalBackend(built[0]), latency_s=0.5))
+    ds.prefetch([2])  # still being fetched by this process's thread when the fork happens
+
+    def child():
+        return ds.get_batch([250]).to_scipy().toarray()
+
+    assert np.array_equal(run_in_forked_child(child), expected[[250]].toarray())
+    assert same(ds.get_batch([250]).to_scipy(), expected[[250]])
+    ds.close()
+
+
+def test_forked_process_with_decode_threads(built, expected):
+    ds = open_dataset(built[0], decode_threads=2)  # tiles have 3 chunks, so a decode pool is started
+    ds.get_batch([1])
+    idx = [120, 30]
+    assert np.array_equal(run_in_forked_child(lambda: ds.get_batch(idx).to_scipy().toarray()), expected[idx].toarray())
+    ds.close()
+
+
+def test_forked_process_starts_from_empty_caches(built):
+    ds = open_dataset(built[0])
+    ds.get_batch([1, 150])
+
+    def child():
+        return (len(ds._tiles), len(ds._decoded), ds._io_pool is None, ds.stats["tiles_fetched"])
+
+    assert run_in_forked_child(child) == (0, 0, True, 0)  # as after unpickling
+    assert len(ds._tiles) == 2 and ds.stats["tiles_fetched"] == 2  # the parent keeps its own
+    ds.close()

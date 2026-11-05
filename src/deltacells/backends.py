@@ -10,12 +10,15 @@ import logging
 import os
 import random
 import time
+import weakref
 from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+_GCS_BACKENDS: weakref.WeakSet[GCSBackend] = weakref.WeakSet()  # the live ones, to reset in a forked process
 
 
 class Backend(ABC):
@@ -96,7 +99,10 @@ def _data_corruption_types() -> tuple[type[BaseException], ...]:
 class GCSBackend(Backend):
     """Tiles under ``gs://bucket/prefix`` (requires ``google-cloud-storage``; credentials as for that library).
 
-    The client is created lazily and not pickled, so a dataset using this backend can be sent to DataLoader workers.
+    The client is created lazily and not pickled, so a dataset using this backend can be sent to DataLoader workers. A forked
+    process (a DataLoader worker on Linux) does the same: a client that this backend made is dropped in the forked process,
+    which makes its own on first use, so that processes do not share the client's open connections. (A client that was passed
+    in cannot be made again, so it is kept; use one that is safe to fork, or let the backend make its own.)
     Note: only exercised by this package's test-suite with fake clients (no network access there); the throttled-backend
     tests and benchmarks emulate a remote store.
 
@@ -113,7 +119,9 @@ class GCSBackend(Backend):
         self.bucket_name, self.prefix = bucket, prefix.strip("/")
         self.max_attempts = max_attempts
         self._client = client
+        self._owns_client = client is None  # whether this object makes the client (so it can make another)
         self._bucket: Any = None
+        _GCS_BACKENDS.add(self)
 
     def _blob(self, name: str):
         if self._bucket is None:
@@ -174,6 +182,30 @@ class GCSBackend(Backend):
         state["_client"] = None
         state["_bucket"] = None
         return state
+
+    def __setstate__(self, state) -> None:
+        self.__dict__.update(state)
+        self._owns_client = True  # the client that was given (if any) was not pickled: this object makes its own
+        _GCS_BACKENDS.add(self)
+
+    def _reset_after_fork(self) -> None:
+        if self._owns_client:
+            self._client = None
+            self._bucket = None
+
+
+def _reset_gcs_backends_after_fork() -> None:
+    """Make a forked process drop the clients that its inherited ``GCSBackend``s made (see the class), so that it does not
+    share their open connections with its parent. Exceptions are only printed in an at-fork hook, so log them instead."""
+    for backend in list(_GCS_BACKENDS):
+        try:
+            backend._reset_after_fork()
+        except Exception:  # pragma: no cover
+            logger.exception("could not reset a GCSBackend in a forked process")
+
+
+if hasattr(os, "register_at_fork"):  # not on Windows, where there is no fork
+    os.register_at_fork(after_in_child=_reset_gcs_backends_after_fork)
 
 
 class ThrottledBackend(Backend):

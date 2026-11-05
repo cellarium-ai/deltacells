@@ -105,8 +105,10 @@ GPU before densifying it: a dense batch of 5,000 cells by 30,000 genes is 600 MB
   (default 2) bounds the cache, and decode buffers are reused rather than reallocated.
 * **Threads.** `decode_threads=1` (the default) is right when each worker has about one core. The decoder releases the Python
   GIL, so more threads decode a tile's chunks in parallel.
-* **Pickling.** The dataset object can be pickled, which is how it reaches the `DataLoader` workers. Caches and threads are
-  rebuilt in each worker.
+* **Pickling and forking.** The dataset object can be pickled, which is how it reaches the `DataLoader` workers when they are
+  started by `spawn`. Caches and threads are rebuilt in each worker. Workers started by `fork` (the default on Linux) get the
+  same fresh state: a forked process starts with empty caches and no threads, so it is safe to read from the dataset in the
+  main process before creating the `DataLoader`. A `GCSBackend` likewise makes its own client in a forked process.
 * **Fewer copies.** To avoid one copy between the worker and the training process, allocate the output tensors in shared memory
   and pass them to `get_batch` (`batch_nnz` gives the size). The reference loader does this.
 

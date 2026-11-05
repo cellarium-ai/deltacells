@@ -5,6 +5,7 @@ import pickle
 import time
 
 import pytest
+from conftest import run_in_forked_child
 
 from deltacells import CorruptGCSDownloadError, GCSBackend, LocalBackend, ThrottledBackend, open_backend
 
@@ -148,6 +149,50 @@ def test_gcs_backend_max_attempts(corruption, sleeps):
     with pytest.raises(ValueError, match="max_attempts"):
         GCSBackend("bkt", max_attempts=0)
     assert pickle.loads(pickle.dumps(GCSBackend("bkt", max_attempts=7))).max_attempts == 7
+
+
+def test_gcs_backend_forked_process_makes_its_own_client(monkeypatch):
+    # A client holds open connections, which a forked process must not share with its parent.
+    storage = pytest.importorskip("google.cloud.storage")
+    made = []
+
+    class Client(_FakeClient):
+        def __init__(self):
+            super().__init__({"p/x": b"abc"})
+            made.append(self)
+
+    monkeypatch.setattr(storage, "Client", Client)
+    b = GCSBackend("bkt", "p")
+    assert b.read("x") == b"abc" and len(made) == 1
+
+    def child():
+        before = (b._client is None, b._bucket is None)
+        return before, b.read("x"), len(made)
+
+    assert run_in_forked_child(child) == ((True, True), b"abc", 2)  # none inherited, then one made
+    assert b._client is made[0] and len(made) == 1  # the parent keeps its own
+
+
+def test_gcs_backend_forked_process_keeps_a_client_it_was_given():
+    client = _FakeClient({"p/x": b"abc"})
+    b = GCSBackend("bkt", "p", client=client)  # it cannot make another one like it
+    assert b.read("x") == b"abc"
+    assert run_in_forked_child(lambda: (b._client is client, b.read("x"))) == (True, b"abc")
+
+
+def test_unpickled_gcs_backend_is_also_reset_in_a_forked_process(monkeypatch):
+    storage = pytest.importorskip("google.cloud.storage")
+    made = []
+
+    class Client(_FakeClient):
+        def __init__(self):
+            super().__init__({"p/x": b"abc"})
+            made.append(self)
+
+    monkeypatch.setattr(storage, "Client", Client)
+    b = pickle.loads(pickle.dumps(GCSBackend("bkt", "p", client=_FakeClient({}))))  # its given client is not pickled
+    assert b.read("x") == b"abc" and len(made) == 1
+    assert run_in_forked_child(lambda: (b._client is None, b.read("x"), len(made))) == (True, b"abc", 2)
 
 
 def test_throttled_backend(tmp_path):
