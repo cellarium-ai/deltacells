@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from deltacells import GCSBackend, LocalBackend, ThrottledBackend, open_backend
+from deltacells import CorruptGCSDownloadError, GCSBackend, LocalBackend, ThrottledBackend, open_backend
 
 
 def test_local_backend(tmp_path):
@@ -57,6 +57,97 @@ def test_gcs_backend_with_fake_client_and_pickling():
     assert b.read("tiles/t") == b"abc" and b.exists("manifest.json") and not b.exists("zzz")
     state = b.__getstate__()
     assert state["_client"] is None and state["_bucket"] is None  # not pickled: workers create their own client
+
+
+class _FlakyClient:
+    """A fake client whose downloads raise ``error`` (made fresh each time by ``make_error``) the first ``failures`` times."""
+
+    def __init__(self, make_error, failures, payload=b"0123456789"):
+        self.make_error, self.failures, self.payload = make_error, failures, payload
+        self.calls = []  # (object name, start, end) of every download attempt
+
+    def bucket(self, name):
+        return self
+
+    def blob(self, name):
+        client = self
+
+        class Blob:
+            def download_as_bytes(self, start=None, end=None):
+                client.calls.append((name, start, end))
+                if len(client.calls) <= client.failures:
+                    raise client.make_error()
+                return client.payload if start is None else client.payload[start : end + 1]
+
+        return Blob()
+
+
+@pytest.fixture
+def corruption():
+    """The exception ``google-cloud-storage`` raises for a checksum mismatch, as a function making one."""
+    exceptions = pytest.importorskip("google.cloud.storage.exceptions")
+    return lambda: exceptions.DataCorruption(None, "Checksum mismatch: expected 'AAAA==', got 'BBBB=='")
+
+
+@pytest.fixture
+def sleeps(monkeypatch):
+    """Record the pauses between attempts instead of waiting."""
+    paused = []
+    monkeypatch.setattr(time, "sleep", paused.append)
+    return paused
+
+
+@pytest.mark.parametrize("failures", [1, 2, 3])
+def test_gcs_backend_repeats_a_download_that_fails_its_checksum(corruption, sleeps, caplog, failures):
+    client = _FlakyClient(corruption, failures)
+    b = GCSBackend("bkt", "pre", client=client)  # 4 attempts by default
+    with caplog.at_level("WARNING", logger="deltacells.backends"):
+        assert b.read("tiles/t") == b"0123456789"
+    assert len(client.calls) == failures + 1 and {c[0] for c in client.calls} == {"pre/tiles/t"}
+    assert len(sleeps) == failures
+    for k, pause in enumerate(sleeps):  # 0.5 s, 1 s, 2 s, each lengthened by up to 50%
+        assert 0.5 * 2**k <= pause <= 0.75 * 2**k
+    warnings = [r.getMessage() for r in caplog.records]
+    assert len(warnings) == failures and all("gs://bkt/pre/tiles/t" in w and "Checksum mismatch" in w for w in warnings)
+
+
+def test_gcs_backend_repeats_ranged_reads_too(corruption, sleeps):
+    client = _FlakyClient(corruption, failures=2)
+    assert GCSBackend("bkt", client=client).read_range("tiles/t", 2, 3) == b"234"
+    assert client.calls == [("tiles/t", 2, 4)] * 3 and len(sleeps) == 2  # the same inclusive range every time
+
+
+def test_gcs_backend_gives_up_with_an_error_that_names_the_object(corruption, sleeps):
+    client = _FlakyClient(corruption, failures=99)
+    b = GCSBackend("bkt", "pre/fix", client=client)
+    with pytest.raises(CorruptGCSDownloadError) as info:
+        b.read("tiles/tile_000007.dct")
+    assert len(client.calls) == 4 and len(sleeps) == 3  # no pause after the last attempt
+    err = info.value
+    assert isinstance(err, OSError) and isinstance(err.__cause__, type(corruption()))
+    for text in ("gs://bkt/pre/fix/tiles/tile_000007.dct", "all 4 attempts", "expected 'AAAA=='", "got 'BBBB=='"):
+        assert text in str(err)
+    # What a DataLoader worker does to an exception on its way to the main process must not lose the message.
+    assert str(type(err)(str(err))) == str(err) and str(pickle.loads(pickle.dumps(err))) == str(err)
+
+
+def test_gcs_backend_does_not_repeat_other_errors(corruption, sleeps):
+    client = _FlakyClient(lambda: ConnectionError("reset"), failures=99)
+    with pytest.raises(ConnectionError, match="reset"):
+        GCSBackend("bkt", client=client).read("x")
+    assert len(client.calls) == 1 and sleeps == []
+
+
+def test_gcs_backend_max_attempts(corruption, sleeps):
+    client = _FlakyClient(corruption, failures=99)
+    with pytest.raises(CorruptGCSDownloadError, match="all 1 attempts"):
+        GCSBackend("bkt", client=client, max_attempts=1).read("x")
+    assert len(client.calls) == 1 and sleeps == []
+    client = _FlakyClient(corruption, failures=5)
+    assert GCSBackend("bkt", client=client, max_attempts=6).read("x") == b"0123456789" and len(client.calls) == 6
+    with pytest.raises(ValueError, match="max_attempts"):
+        GCSBackend("bkt", max_attempts=0)
+    assert pickle.loads(pickle.dumps(GCSBackend("bkt", max_attempts=7))).max_attempts == 7
 
 
 def test_throttled_backend(tmp_path):

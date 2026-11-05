@@ -7,6 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 from deltacells.backends import (
     Backend,
+    CorruptGCSDownloadError,
     CountingBackend,
     GCSBackend,
     LocalBackend,
@@ -27,6 +28,7 @@ except PackageNotFoundError:  # pragma: no cover  (the sources are used in place
 
 __all__ = [
     "Backend",
+    "CorruptGCSDownloadError",
     "CountingBackend",
     "DatasetWriter",
     "DecodedTile",
