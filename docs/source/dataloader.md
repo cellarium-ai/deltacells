@@ -99,6 +99,14 @@ GPU before densifying it: a dense batch of 5,000 cells by 30,000 genes is 600 MB
 * **Iterate tile by tile.** A batch that spans two tiles reads and decodes both. Shuffling tiles and then cells within a tile
   (as above) keeps consecutive batches on the same tile, and it is what gives the throughput measured in the
   [benchmarks](benchmarks.md).
+* **Batches that span many tiles.** A batch that touches no more than `max_prefetch_tiles` tiles (default 8) fetches them all
+  at once. One that touches more, such as a random sample from the whole dataset, is read as a stream: the start of each tile
+  (its `indptr`, about 8 bytes per cell, one small ranged read) is read first to lay out the output, then the tiles are
+  fetched through a window of `max_prefetch_tiles`, decoded and gathered one at a time, so memory does not grow with the number
+  of tiles and no tile is read in full twice. This needs a backend with ranged reads, which the local and `gs://` backends
+  have (a custom `Backend` sets `ranged_reads = True` once its `read_range` is a real ranged read; otherwise such a batch
+  raises `NotImplementedError`). It is still slow to read a few cells from each of many tiles, as every tile is read and
+  decoded whole: read the cells of a tile together instead.
 * **Prefetch.** `prefetch` starts fetching and parsing tiles on background threads, which hides the latency of a bucket. The
   example above looks two tiles ahead.
 * **Memory.** A decoded tile takes about 8 bytes per nonzero, which is around 0.4 GB for 10,000 deep cells. `max_cached_tiles`

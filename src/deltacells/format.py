@@ -167,6 +167,54 @@ def parse_tile_info(buf) -> TileInfo:
     return TileInfo(version, flags, n_cells, nnz, n_genes, indptr_off, total_size, crc32, tuple(chunks))
 
 
+def parse_tile_prefix(
+    buf, *, n_cells: int, n_genes: int, size: int | None = None
+) -> tuple[int, int, tuple[ChunkInfo, ...]]:
+    """Parse and validate the start of a tile blob: its header, chunk table and indptr, which are contiguous. Returns
+    ``(nnz, indptr_off, chunks)``.
+
+    ``n_cells``, ``n_genes`` and (if given) the total ``size`` of the blob are what the manifest says of the tile. This is
+    what can be checked of a tile when only its start has been read (to learn the lengths of its cells without reading all
+    of it); what needs the rest of the blob, that every stream lies inside it, is checked by :func:`parse_tile_info` when the
+    whole tile is parsed.
+    """
+    mv = memoryview(buf)
+    if mv.ndim != 1 or mv.itemsize != 1:
+        mv = mv.cast("B")
+    if len(mv) < HEADER_SIZE:
+        raise FormatError("the start of the tile is smaller than the tile header")
+    magic, version, flags, h_cells, nnz, h_genes, n_chunks, indptr_off, total_size, _, _ = _HEADER.unpack_from(mv, 0)
+    if magic != MAGIC:
+        raise FormatError("bad magic: not a deltacells tile")
+    if version != VERSION:
+        raise FormatError(f"unsupported tile format version {version} (this build reads version {VERSION})")
+    if flags != 0:
+        raise FormatError(f"unsupported flags {flags:#x}")
+    if h_cells != n_cells or h_genes != n_genes:
+        raise FormatError(
+            f"the tile has {h_cells} cells and {h_genes} genes, the manifest says {n_cells} and {n_genes}"
+        )
+    if size is not None and total_size != size:
+        raise FormatError(f"the tile header says {total_size} bytes, the manifest says {size}")
+    table_end = HEADER_SIZE + n_chunks * CHUNK_ENTRY_SIZE
+    indptr_end = indptr_off + 8 * (n_cells + 1)
+    if n_chunks < 1 or indptr_off % 8 != 0 or indptr_off < table_end:
+        raise FormatError("inconsistent chunk table / indptr offsets")
+    if indptr_end > len(mv):
+        raise FormatError(f"the start of the tile has {len(mv)} bytes, but its indptr ends at byte {indptr_end}")
+    chunks = []
+    cell, pos = 0, 0
+    for i in range(n_chunks):
+        c = ChunkInfo(*_CHUNK.unpack_from(mv, HEADER_SIZE + i * CHUNK_ENTRY_SIZE))
+        if c.cell_lo != cell or c.cell_hi < c.cell_lo or c.nnz_lo != pos or c.nnz_hi < c.nnz_lo:
+            raise FormatError(f"chunk {i} is not contiguous with the previous chunk")
+        cell, pos = c.cell_hi, c.nnz_hi
+        chunks.append(c)
+    if cell != n_cells or pos != nnz:
+        raise FormatError("chunks do not cover all cells / nonzeros")
+    return nnz, indptr_off, tuple(chunks)
+
+
 def payload_crc32(buf) -> int:
     """CRC32 of everything after the 64-byte header."""
     return zlib.crc32(memoryview(buf)[HEADER_SIZE:]) & 0xFFFFFFFF

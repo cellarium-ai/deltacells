@@ -24,6 +24,11 @@ _GCS_BACKENDS: weakref.WeakSet[GCSBackend] = weakref.WeakSet()  # the live ones,
 class Backend(ABC):
     """Read-only access to the objects of a dataset (``manifest.json``, ``tiles/tile_000000.dct``, ...)."""
 
+    ranged_reads: bool = False
+    """Whether :meth:`read_range` is a real ranged read (reading only those bytes), not the default that reads the whole
+    object. A backend that overrides ``read_range`` this way sets it to ``True``. A batch of cells that touches more tiles
+    than ``max_prefetch_tiles`` is read by first reading the start of each tile, which needs it."""
+
     @abstractmethod
     def read(self, name: str):
         """Return the object's bytes as a bytes-like object (``bytes`` or a uint8 ``ndarray``)."""
@@ -46,6 +51,8 @@ class Backend(ABC):
 
 class LocalBackend(Backend):
     """Tiles in a local directory."""
+
+    ranged_reads = True
 
     def __init__(self, root: str) -> None:
         self.root = os.path.abspath(os.path.expanduser(root))
@@ -112,6 +119,8 @@ class GCSBackend(Backend):
     lengthened by up to 50%), and log a warning for each repeat. If every attempt fails, :class:`CorruptGCSDownloadError` is
     raised, naming the object. Any other error is raised at once.
     """
+
+    ranged_reads = True
 
     def __init__(self, bucket: str, prefix: str = "", client=None, max_attempts: int = 4) -> None:
         if max_attempts < 1:
@@ -217,6 +226,7 @@ class ThrottledBackend(Backend):
 
     def __init__(self, inner: Backend, *, latency_s: float = 0.0, bandwidth_bytes_per_s: float | None = None) -> None:
         self.inner, self.latency_s, self.bandwidth = inner, latency_s, bandwidth_bytes_per_s
+        self.ranged_reads = inner.ranged_reads
 
     def read(self, name: str):
         t0 = time.perf_counter()
@@ -253,6 +263,7 @@ class CountingBackend(Backend):
 
     def __init__(self, inner: Backend) -> None:
         self.inner = inner
+        self.ranged_reads = inner.ranged_reads
         self.reset()
 
     def reset(self) -> None:

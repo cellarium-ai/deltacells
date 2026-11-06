@@ -14,7 +14,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from deltacells import _core
-from deltacells.format import FormatError, TileInfo, parse_tile_info, payload_crc32
+from deltacells.format import FormatError, TileInfo, parse_tile_info, parse_tile_prefix, payload_crc32
 
 if TYPE_CHECKING:  # pragma: no cover
     import torch
@@ -152,6 +152,21 @@ class DecodedTile:
             _check_out(out_values, "out_values", nnz, vdt)
         gather_into(self.indptr, self.indices, self.values, rows, out_indptr[:-1].copy(), out_indices, out_values)
         return SparseBatch(out_indptr, out_indices[:nnz], out_values[:nnz], self.n_genes)
+
+
+def read_tile_prefix_indptr(buf, *, n_cells: int, n_genes: int, size: int | None = None) -> np.ndarray:
+    """The ``indptr`` (int64, ``n_cells + 1``) of a tile, from the start of its blob (header, chunk table and indptr; any
+    bytes-like object that is at least that long), validated as much as that start allows (see
+    :func:`deltacells.format.parse_tile_prefix`; ``n_cells``, ``n_genes`` and ``size`` are what the manifest says).
+    Raises :class:`FormatError` if it is not valid."""
+    nnz, indptr_off, chunks = parse_tile_prefix(buf, n_cells=n_cells, n_genes=n_genes, size=size)
+    indptr = np.frombuffer(buf, dtype="<i8", count=n_cells + 1, offset=indptr_off).astype(np.int64)
+    if indptr[0] != 0 or indptr[-1] != nnz or np.any(np.diff(indptr) < 0):
+        raise FormatError("invalid indptr")
+    for c in chunks:
+        if indptr[c.cell_lo] != c.nnz_lo or indptr[c.cell_hi] != c.nnz_hi:
+            raise FormatError("indptr does not match the chunk table")
+    return indptr
 
 
 class Tile:
